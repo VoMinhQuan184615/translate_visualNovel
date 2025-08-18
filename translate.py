@@ -2,8 +2,8 @@ import os
 import re
 import time
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from deep_translator import GoogleTranslator
+from concurrent.futures import ThreadPoolExecutor
+from deep_translator import GoogleTranslator  # có thể thay bằng DeepL API
 
 # ===================== Cấu hình =====================
 translator = GoogleTranslator(source="en", target="vi")
@@ -11,37 +11,55 @@ game_folder = r"D:/Game/Visua_novel/I_Am_Motherfucker/I Am Motherfucker/game"
 tl_folder = os.path.join(game_folder, "tl", "vietnamese")
 os.makedirs(tl_folder, exist_ok=True)
 
-pattern = re.compile(r'\"(.*?)\"')
+# Cache để tránh dịch lại
+translation_cache = {}
 
-# ===================== Hàm chia câu dài =====================
-def split_long_text(text, max_len=200):
-    if len(text) <= max_len:
-        return [text]
-    split_points = [m.end() for m in re.finditer(r'[.,;!?]\s', text)]
-    parts = []
-    last = 0
-    for point in split_points:
-        if point - last > max_len:
-            parts.append(text[last:point])
-            last = point
-    if last < len(text):
-        parts.append(text[last:])
-    return parts if parts else [text]
+# Regex giữ nguyên placeholder {variable}
+placeholder_pattern = re.compile(r"\{.*?\}")
+
+# ===================== Chia đoạn =====================
+def split_into_paragraphs(lines, max_len=500):
+    paragraphs = []
+    buffer = ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if buffer:
+                paragraphs.append(buffer)
+                buffer = ""
+        else:
+            if len(buffer) + len(stripped) + 1 > max_len:
+                paragraphs.append(buffer)
+                buffer = stripped
+            else:
+                buffer += " " + stripped if buffer else stripped
+    if buffer:
+        paragraphs.append(buffer)
+    return paragraphs
 
 # ===================== Dịch an toàn =====================
 def safe_translate(text, retries=3, delay=2):
     if not text.strip():
         return text
+    if text in translation_cache:
+        return translation_cache[text]
+    
+    # giữ placeholder
+    placeholders = placeholder_pattern.findall(text)
+    text_for_translation = placeholder_pattern.sub("<PLACEHOLDER>", text)
+    
     for i in range(retries):
         try:
-            translated = translator.translate(text)
-            if translated is None:
-                return text
+            translated = translator.translate(text_for_translation)
+            # thay lại placeholder
+            for ph in placeholders:
+                translated = translated.replace("<PLACEHOLDER>", ph, 1)
+            translation_cache[text] = translated
             return translated
         except Exception as e:
-            wait = delay * (i + 1)
-            time.sleep(wait)
-    return text  # fallback: giữ nguyên text gốc
+            time.sleep(delay * (i + 1))
+    translation_cache[text] = text
+    return text  # fallback giữ nguyên
 
 # ===================== Dịch 1 file =====================
 def translate_file(file_name, progress_dict, index):
@@ -51,63 +69,60 @@ def translate_file(file_name, progress_dict, index):
     with open(input_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
-    # Lấy tất cả text trong file
-    line_indices = []
-    texts_to_translate = []
+    paragraphs = split_into_paragraphs(lines)
+    total = len(paragraphs)
+    translated_paragraphs = []
 
-    for idx, line in enumerate(lines):
-        matches = pattern.findall(line)
-        for m in matches:
-            parts = split_long_text(m)
-            for part in parts:
-                texts_to_translate.append(part)
-                line_indices.append((idx, part))
-
-    total = len(texts_to_translate)
-    if total == 0:
-        progress_dict[index] = 100
-        return file_name
-
-    # Dịch từng câu và cập nhật tiến trình
-    translated_texts = []
-    for i, t in enumerate(texts_to_translate):
-        translated_texts.append(safe_translate(t))
+    for i, p in enumerate(paragraphs):
+        translated_paragraphs.append(safe_translate(p))
         progress_dict[index] = (i + 1) / total * 100
 
-    # Thay text vào file
-    for (idx, original), translated in zip(line_indices, translated_texts):
-        lines[idx] = lines[idx].replace(original, translated)
+    # Ghi lại file, thay thế từng đoạn
+    output_lines = []
+    para_idx = 0
+    buffer = ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if buffer:
+                # thay buffer bằng bản dịch
+                output_lines.extend(translated_paragraphs[para_idx].splitlines(keepends=True))
+                para_idx += 1
+                buffer = ""
+            output_lines.append(line)
+        else:
+            buffer += line
+    if buffer:
+        output_lines.extend(translated_paragraphs[para_idx].splitlines(keepends=True))
 
     with open(output_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+        f.writelines(output_lines)
 
     progress_dict[index] = 100
     return file_name
 
 # ===================== Danh sách file .rpy =====================
 rpy_files = [f for f in os.listdir(game_folder) if f.endswith(".rpy")]
-progress_dict = {i:0 for i in range(len(rpy_files))}
+progress_dict = {i: 0 for i in range(len(rpy_files))}
 
-# ===================== Hàm in tiến trình =====================
+# ===================== In tiến trình =====================
 def print_progress():
     for idx, f in enumerate(rpy_files):
-        sys.stdout.write(f"\r\033[{len(rpy_files)}A")  # move cursor up
-        break
-    for idx, f in enumerate(rpy_files):
         percent = progress_dict[idx]
-        sys.stdout.write(f"[{idx+1}/{len(rpy_files)}] {f}: {percent:.1f}% câu hoàn thành\n")
+        sys.stdout.write(f"[{idx+1}/{len(rpy_files)}] {f}: {percent:.1f}% hoàn thành\n")
     sys.stdout.flush()
 
 # ===================== Dịch đa luồng =====================
 with ThreadPoolExecutor(max_workers=4) as executor:
     futures = {executor.submit(translate_file, f, progress_dict, idx): idx for idx, f in enumerate(rpy_files)}
 
-    # Cập nhật tiến trình liên tục
-    while any(future.running() for future in futures):
+    while any(f.running() for f in futures):
+        sys.stdout.write("\033[F" * len(rpy_files))  # di chuyển cursor lên đầu
         print_progress()
-        time.sleep(0.2)
+        time.sleep(0.3)
 
-    # In lần cuối sau khi tất cả xong
+    # In lần cuối
+    sys.stdout.write("\033[F" * len(rpy_files))
     print_progress()
 
 print("\n🎉 Hoàn tất dịch tất cả file .rpy!")
