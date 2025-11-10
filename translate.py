@@ -2,22 +2,25 @@ import os
 import re
 import time
 import sys
+import argparse
 from concurrent.futures import ThreadPoolExecutor
-from deep_translator import GoogleTranslator  # có thể thay bằng DeepL API
+from deep_translator import GoogleTranslator
 
-# ===================== Cấu hình =====================
-translator = GoogleTranslator(source="en", target="vi")
-game_folder = r"D:/Game/Visua_novel/I_Am_Motherfucker/I Am Motherfucker/game"
+# ===================== Nhận đường dẫn từ CMD =====================
+parser = argparse.ArgumentParser(description="Dịch .rpy sang tiếng Việt")
+parser.add_argument("--game_folder", type=str, required=True, help="Đường dẫn folder game chứa file .rpy")
+args = parser.parse_args()
+
+game_folder = os.path.abspath(args.game_folder)
 tl_folder = os.path.join(game_folder, "tl", "vietnamese")
 os.makedirs(tl_folder, exist_ok=True)
 
-# Cache để tránh dịch lại
+# ===================== Cấu hình dịch =====================
+translator = GoogleTranslator(source="en", target="vi")
 translation_cache = {}
-
-# Regex giữ nguyên placeholder {variable}
 placeholder_pattern = re.compile(r"\{.*?\}")
 
-# ===================== Chia đoạn =====================
+# ===================== Hàm chia đoạn =====================
 def split_into_paragraphs(lines, max_len=500):
     paragraphs = []
     buffer = ""
@@ -43,23 +46,19 @@ def safe_translate(text, retries=3, delay=2):
         return text
     if text in translation_cache:
         return translation_cache[text]
-    
-    # giữ placeholder
     placeholders = placeholder_pattern.findall(text)
     text_for_translation = placeholder_pattern.sub("<PLACEHOLDER>", text)
-    
     for i in range(retries):
         try:
             translated = translator.translate(text_for_translation)
-            # thay lại placeholder
             for ph in placeholders:
                 translated = translated.replace("<PLACEHOLDER>", ph, 1)
             translation_cache[text] = translated
             return translated
-        except Exception as e:
+        except Exception:
             time.sleep(delay * (i + 1))
     translation_cache[text] = text
-    return text  # fallback giữ nguyên
+    return text
 
 # ===================== Dịch 1 file =====================
 def translate_file(file_name, progress_dict, index):
@@ -77,7 +76,6 @@ def translate_file(file_name, progress_dict, index):
         translated_paragraphs.append(safe_translate(p))
         progress_dict[index] = (i + 1) / total * 100
 
-    # Ghi lại file, thay thế từng đoạn
     output_lines = []
     para_idx = 0
     buffer = ""
@@ -85,7 +83,6 @@ def translate_file(file_name, progress_dict, index):
         stripped = line.strip()
         if not stripped:
             if buffer:
-                # thay buffer bằng bản dịch
                 output_lines.extend(translated_paragraphs[para_idx].splitlines(keepends=True))
                 para_idx += 1
                 buffer = ""
@@ -121,7 +118,6 @@ with ThreadPoolExecutor(max_workers=4) as executor:
         print_progress()
         time.sleep(0.3)
 
-    # In lần cuối
     sys.stdout.write("\033[F" * len(rpy_files))
     print_progress()
 
